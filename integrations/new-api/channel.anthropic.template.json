@@ -1,0 +1,22 @@
+{
+  "mode": "single",
+  "channel": {
+    "type": 14,
+    "name": "Cursor SDK - Anthropic",
+    "key": "<GATEWAY_ACCESS_KEY>",
+    "base_url": "http://gateway:8080",
+    "models": "claude-sonnet-4-6",
+    "group": "default",
+    "priority": 0,
+    "weight": 0,
+    "auto_ban": 0
+  },
+  "gateway": {
+    "default_runtime_profile": "sdk",
+    "allow_request_runtime_profile": false,
+    "x-cursor-runtime-profile": "sdk|sand when ALLOW_REQUEST_RUNTIME_PROFILE=true",
+    "hosted_search_mode": "off",
+    "compact": "Anthropic Messages has no compact route; use Responses compact on the OpenAI channel",
+    "receipt": "Bill from terminal usage plus provider receipt; do not infer consumption from HTTP retries"
+  }
+}

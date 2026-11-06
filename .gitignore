@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+.env*
+!.env.example
+*.log
+.DS_Store
+.grok-companion/
+tmp/
+_temp/
+.cursor-sdk2api/
+*.tsbuildinfo
+
+# 本地部署状态（含导入的 Cursor Key、会话状态、运行日志、pid）
+state/
+logs/

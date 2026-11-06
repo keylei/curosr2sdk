@@ -1,0 +1,118 @@
+# Deployment
+
+## Local
+
+```bash
+cp .env.example .env
+npm ci
+npm run build
+node dist/index.js
+```
+
+The immutable build includes the optional BF Labs Operator Console at
+`/console/`. It is served by the same Node process from `dist/console`; no
+second production service is required. Set `CONSOLE_DIR` only when an operator
+intentionally supplies a different prebuilt static bundle.
+
+Loading the page and its v0.1 management calls is unauthenticated. A Cursor key
+is sent only during import and is not returned to the browser afterward; the
+roster keeps only account ids and masked hints. The supplied compose files bind
+the console to `127.0.0.1`. An Internet-facing reverse proxy must authenticate
+and restrict `/console/` and `/v0/management/*`.
+
+## Docker
+
+```bash
+docker build -t cursor-sdk2api:local .
+docker run --rm -p 127.0.0.1:8080:8080 \
+  -e AUTH_MODE=managed \
+  -e GATEWAY_ACCESS_KEY='replace-me' \
+  -v cursor-sdk2api-data:/data \
+  cursor-sdk2api:local
+```
+
+`docker-compose.yml` is a single-service wrapper. It does not mount files from other projects and does not ship secrets.
+
+## GHCR releases
+
+An approved `v<package-version>` tag runs the release workflow. It re-runs the
+deterministic gate, secret scan, and critical-image vulnerability scan, then
+publishes `linux/amd64` and `linux/arm64` images with OCI provenance and SBOM
+attestations. The generated GitHub Release includes `image-digest.txt` so an
+operator can deploy an immutable reference:
+
+The runtime stage is a pinned non-root distroless Node 22 / Debian 13 image. It contains no
+shell, package manager, or npm CLI; production dependencies are pruned in the
+build stage and copied into the runtime image.
+
+```bash
+docker pull ghcr.io/keylei/curosr2sdk@sha256:<digest>
+docker run --rm -p 127.0.0.1:8080:8080 \
+  ghcr.io/keylei/curosr2sdk@sha256:<digest>
+```
+
+Source changes and a green workflow do not mean an image exists. Creating the
+tag and GitHub Release remains a separate maintainer action.
+
+The existing `v0.1.0` source Release predates this GHCR workflow and has no
+container asset. Before a later approved release, bump `package.json`, create
+the matching new tag, verify the GHCR package is public, and prove an
+unauthenticated pull by digest.
+
+For a two-service new-api example, see
+[`NEW_API_INTEGRATION.md`](NEW_API_INTEGRATION.md).
+
+## Outbound proxy
+
+The official SDK does not automatically inherit the host proxy. When
+`HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` is present (uppercase or lowercase),
+the gateway routes both SDK data planes: Agent runs switch to HTTP/1.1 through
+`proxy-agent`, and catalog/account fetches use Undici's environment proxy
+dispatcher. `NO_PROXY` is honored. Only `http://` and `https://` proxy URLs are
+accepted; SOCKS/PAC configurations fail closed. Health reports only
+`proxy_configured`, `agent_transport`, and `fetch_transport`; URLs and
+credentials are never exposed.
+
+For Docker Desktop, point at a host proxy with `host.docker.internal`, for
+example `HTTPS_PROXY=http://host.docker.internal:7890`. `127.0.0.1` inside the
+container is the container itself.
+
+## State directory
+
+Set `STATE_DIR` for:
+
+- official `@cursor/sdk` `JsonlLocalAgentStore` (`$STATE_DIR/sdk-store/<credential-fingerprint>`)
+- gateway lineage metadata (`$STATE_DIR/lineage`, mode `0700` / files `0600`)
+
+Host / local-dev default (no `STATE_DIR`) is a process temp path: `$TMPDIR/cursor-sdk2api/state`. The container **image** and `docker-compose.yml` default `STATE_DIR` to `/data` and compose declares a named volume. A bare `docker run` without `-e STATE_DIR` still gets `/data` from the image `ENV`.
+
+Lineage schema v2 stores only session id, SDK agent id, credential fingerprint, model and explicit model parameters, canonical session-policy and executable-tool-catalog digests, state, pending tool ids and names, optional result digest, and timestamps. It does not store API keys, prompts, tool schemas/args/results, or assistant bodies. Older/incomplete lineage is quarantined and fails closed. Pending tool results can resume the persisted SDK Agent after restart when the client resends the exact tool catalog and pending id batch. Assistant replay bodies are **not** persisted, so duplicate-same replay after a later restart is still unavailable.
+
+Session/registry TTL and the periodic sweep share the same clock. Completed and recoverable pending lineage expire with `SESSION_TTL_MS` (default 30 minutes), then they are deleted. Graceful shutdown does not delete recoverable lineage.
+
+Completed follow-up with `x-cursor-session-id` can `Agent.resume` within the session TTL if credential and model match. Pending callback Promises themselves are not serialized; after restart the gateway resumes the persisted SDK Agent and injects the exact host tool-result batch after validating credential, model, catalog, and ids.
+
+## Unified gateway key and BYOK
+
+- BYOK: clients send a Cursor API key. Suitable for a trusted local sidecar.
+- Managed pool: set `AUTH_MODE=managed` and `GATEWAY_ACCESS_KEY`, then import one or more Cursor keys in `/console/`. `CURSOR_API_KEY` is optional and only seeds the persistent pool.
+- New sessions use model-aware round-robin across compatible accounts. Tool continuation, completed follow-up, and exact persisted restart recovery stay bound to the original credential fingerprint. Before semantic output, managed mode may try one alternate compatible account. If the original account is removed, a self-contained tool transcript may cold-branch to another compatible account.
+
+BYOK credentials share the gateway process and capacity limits, but their official SDK stores and empty workspace directories are separated by credential fingerprint. This is process-local tenant isolation, not a claim of hardened hostile multi-tenant hosting; public Internet deployment still requires TLS, access controls, encrypted state, monitoring, and an explicit operator threat model.
+
+## Drain and upgrade
+
+In-process SDK Run handles and pending tool Promises cannot move to another process.
+
+1. Stop sending new sessions to the old instance (`SIGTERM` starts drain).
+2. Keep routing existing tool-result traffic to the same instance (sticky ownership).
+3. Wait until active sessions reach zero or the drain deadline.
+4. Then replace the process. Completed lineage and exact pending-tool metadata under `STATE_DIR` survive; live callback Promises do not. A restarted owner resumes the persisted Agent with the validated result batch rather than reusing the lost Promise.
+
+A replica without the original live handle first tries persisted lineage. If that is unavailable, it may cold-branch only from a complete transcript with an exact latest tool batch; otherwise it returns `409 cursor_session_lost` rather than an empty success.
+
+Completed follow-up after restart requires the same `STATE_DIR` volume, `x-cursor-session-id`, and the original account still present in the pool.
+
+## Resource defaults
+
+Development defaults: 4 global active runs, 2 per credential, 30 minute awaiting TTL, 10 minute replay TTL, 60 minute run deadline, and 40 seconds to the first SDK event.
